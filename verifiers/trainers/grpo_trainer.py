@@ -1566,23 +1566,18 @@ class GRPOTrainer(Trainer):
 
         with _true_random_context():
 
-            mlflow.set_experiment(self.args.run_name)
-
             def log_generation(prompt, completion, reward_dict):
+                inputs = {"prompt": prompt}
+                tags = {k: str(v) for k, v in reward_dict.items()}
+                tags |= {"step": str(self.state.global_step)}
+                tags |= {"wandb_run_id": wandb.run.id}
                 span = mlflow.start_span_no_context(
                     name="generation",
-                    inputs={"prompt": prompt}
+                    inputs=inputs,
+                    tags=tags
                 )
-                
                 try:
                     span.set_outputs({"completion": completion})
-                    
-                    all_tags = {**reward_dict}
-                    all_tags["step"] = str(self.state.global_step)
-                    all_tags["wandb_run_id"] = wandb.run.id
-                    
-                    for key, value in all_tags.items():
-                        span.set_tag(key, value)
                 finally:
                     span.end()
 
