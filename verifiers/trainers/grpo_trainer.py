@@ -3,7 +3,8 @@
 import logging
 import time
 from collections import defaultdict, deque
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
+import random
 from typing import Any, Dict, List, Optional, Sized, Tuple, Union
 
 import datasets
@@ -29,6 +30,17 @@ from verifiers.trainers.async_batch_generator import AsyncBatchGenerator, BatchR
 from verifiers.trainers.async_dataloader_wrapper import AsyncDataLoaderWrapper
 from verifiers.trainers.grpo_config import GRPOConfig
 from verifiers.utils.logging_utils import print_prompt_completions_sample
+
+
+@contextmanager
+def _true_random_context():
+    """Temporarily use true randomness, then restore previous state."""
+    saved_state = random.getstate()
+    try:
+        random.seed()  # Reseed with current time
+        yield
+    finally:
+        random.setstate(saved_state)
 
 
 class RepeatSampler(Sampler):
@@ -1552,32 +1564,34 @@ class GRPOTrainer(Trainer):
     def _log_traces_to_mlflow(self, all_prompts, all_completions, all_reward_dict):
         import mlflow
 
-        mlflow.set_experiment(self.args.run_name)
+        with _true_random_context():
 
-        def log_generation(prompt, completion, reward_dict):
-            span = mlflow.start_span_no_context(
-                name="generation",
-                inputs={"prompt": prompt}
-            )
-            
-            try:
-                span.set_outputs({"completion": completion})
+            mlflow.set_experiment(self.args.run_name)
+
+            def log_generation(prompt, completion, reward_dict):
+                span = mlflow.start_span_no_context(
+                    name="generation",
+                    inputs={"prompt": prompt}
+                )
                 
-                all_tags = {**reward_dict}
-                all_tags["step"] = str(self.state.global_step)
-                all_tags["wandb_run_id"] = wandb.run.id
-                
-                for key, value in all_tags.items():
-                    span.set_tag(key, value)
-            finally:
-                span.end()
+                try:
+                    span.set_outputs({"completion": completion})
+                    
+                    all_tags = {**reward_dict}
+                    all_tags["step"] = str(self.state.global_step)
+                    all_tags["wandb_run_id"] = wandb.run.id
+                    
+                    for key, value in all_tags.items():
+                        span.set_tag(key, value)
+                finally:
+                    span.end()
 
-        for i in range(len(all_prompts)):
-            prompt = all_prompts[i]
-            completion = all_completions[i]
-            reward_dict = {k: str(v[i]) for k, v in all_reward_dict.items()}
+            for i in range(len(all_prompts)):
+                prompt = all_prompts[i]
+                completion = all_completions[i]
+                reward_dict = {k: str(v[i]) for k, v in all_reward_dict.items()}
 
-            log_generation(prompt, completion, reward_dict)
+                log_generation(prompt, completion, reward_dict)
 
     def _log_completion_metrics_primary(
         self,
