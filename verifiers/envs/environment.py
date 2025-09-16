@@ -878,7 +878,7 @@ class Environment(ABC):
                     : max_seq_len - len(prompt_ids)
                 ]
                 is_truncated = True
-            if is_truncated and mask_truncated_completions:
+            if (is_truncated or state.get("context_truncated", False)) and mask_truncated_completions:
                 completion_mask = [0] * len(completion_ids)
             assert len(prompt_ids) == len(prompt_mask), (
                 f"Prompt ids: {len(prompt_ids)}, prompt mask: {len(prompt_mask)}"
@@ -896,7 +896,7 @@ class Environment(ABC):
             all_completion_ids.append(completion_ids)
             all_completion_masks.append(completion_mask)
             all_completion_logprobs.append(completion_logprobs)
-            if zero_truncated_completions and is_truncated:
+            if zero_truncated_completions and (is_truncated or state.get("context_truncated", False)):
                 all_rewards.append(0)
             else:
                 all_rewards.append(reward)

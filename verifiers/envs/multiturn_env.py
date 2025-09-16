@@ -1,6 +1,6 @@
 from abc import abstractmethod
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
 from verifiers.envs.environment import Environment
 from verifiers.types import (
@@ -74,14 +74,23 @@ class MultiTurnEnv(Environment):
             if await maybe_await(self.is_completed, rollout, state, **kwargs):
                 is_completed = True
                 break
-            response = await self.get_model_response(
-                client=client,
-                model=model,
-                prompt=rollout,
-                oai_tools=info.get("oai_tools", None),
-                sampling_args=sampling_args,
-                message_type=self.message_type,
-            )
+            try:
+                response = await self.get_model_response(
+                    client=client,
+                    model=model,
+                    prompt=rollout,
+                    oai_tools=info.get("oai_tools", None),
+                    sampling_args=sampling_args,
+                    message_type=self.message_type,
+                )
+            except BadRequestError as e:
+                if "context length" in str(e):
+                    self.logger.warning(f"Context length exceeded at turn {state['turn']}, truncating rollout: {e}")
+                    state["context_truncated"] = True
+                    is_completed = True
+                    break
+                else:
+                    raise
             state["responses"].append(response)
             if self.message_type == "chat":
                 assert isinstance(rollout, list)
