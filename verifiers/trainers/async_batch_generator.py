@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from verifiers import GenerateOutputs
-from verifiers.types import ProcessedOutputs
+from verifiers.types import ProcessedOutputs, State
 
 
 class BatchRequest(BaseModel):
@@ -37,7 +37,8 @@ class BatchResult(BaseModel):
     completions: list[Any] = Field(
         default_factory=list
     )  # Store completions for logging
-    prompts: list[Any] = Field(default_factory=list)  # Store prompts for logging
+    prompts: list[Any] = Field(default_factory=list)
+    states: list[State] = Field(default_factory=list)
 
 
 class AsyncBatchGenerator:
@@ -300,6 +301,7 @@ class AsyncBatchGenerator:
             all_reward_dict=all_reward_dict,
             completions=env_results.completion,
             prompts=env_results.prompt,
+            states=env_results.state,
         )
 
     async def _evaluate_async(self, num_samples: int = -1) -> GenerateOutputs:
