@@ -1064,7 +1064,7 @@ class GRPOTrainer(Trainer):
                     "all_reward_dict": batch_result.all_reward_dict,
                     "completions": batch_result.completions,
                     "prompts": batch_result.prompts,
-                    "segments": batch_result.segments,
+                    "states": batch_result.states,
                 }
             else:
                 broadcast_data = None
@@ -1128,18 +1128,25 @@ class GRPOTrainer(Trainer):
 
             # Log metrics on main process only
             if self.accelerator.is_main_process:
+                # Extract segments from states
+                segments = []
+                for state in broadcast_data["states"]:
+                    segment = state.get("info", {}).get("segment", None)
+                    segments.append(segment)
+
                 self._log_reward_metrics_primary(
                     mode="train",
                     all_reward_dict=broadcast_data["all_reward_dict"],
                     all_rewards=all_rewards,
                     generation_batch_size=len(all_rewards),
-                    segments=broadcast_data["segments"],
+                    segments=segments,
                 )
 
                 self._log_textual_data_primary(
                     all_prompts=broadcast_data["prompts"],
                     all_completions=broadcast_data["completions"],
                     all_reward_dict=broadcast_data["all_reward_dict"],
+                    all_states=broadcast_data["states"],
                 )
 
                 # Log completion metrics using full batch data on CPU to save memory
@@ -1512,7 +1519,7 @@ class GRPOTrainer(Trainer):
     def _log_segment_metrics(
         self,
         mode: str,
-        segments: List[str],
+        segments: List[Optional[str]],
         all_rewards: torch.Tensor,
         all_reward_dict: Dict[str, Any],
     ) -> None:
@@ -1520,7 +1527,7 @@ class GRPOTrainer(Trainer):
         Log metrics grouped by segment.
         Only logs rewards that start with the segment prefix (e.g., segment_a_accuracy for segment-a).
         """
-        unique_segments = list(set(segments))
+        unique_segments = list(set(segment for segment in segments if segment is not None))
 
         for segment in unique_segments:
             # Get indices for this segment
@@ -1565,7 +1572,7 @@ class GRPOTrainer(Trainer):
         all_reward_dict: Dict[str, Any],
         all_rewards: torch.Tensor,
         generation_batch_size: int,
-        segments: Optional[List[str]] = None,
+        segments: List[Optional[str]],
     ) -> None:
         """
         Log generation metrics (PRIMARY PROCESS ONLY).
@@ -1591,7 +1598,7 @@ class GRPOTrainer(Trainer):
                 self._metrics[mode][f"rewards/{reward_key}"].append(mean_reward)
 
         # Log segment-specific metrics if segments are provided
-        if segments:
+        if any(segment is not None for segment in segments):
             self._log_segment_metrics(mode, segments, all_rewards, all_reward_dict)
 
     def _log_textual_data_primary(
@@ -1599,6 +1606,7 @@ class GRPOTrainer(Trainer):
         all_prompts: List[Union[str, List[Dict[str, Any]]]],
         all_completions: List[Union[str, List[Dict[str, Any]]]],
         all_reward_dict: Dict[str, Any],
+        all_states: List[Dict[str, Any]],
     ) -> None:
         """
         Log textual data for wandb (PRIMARY PROCESS ONLY).
@@ -1616,25 +1624,38 @@ class GRPOTrainer(Trainer):
                 else reward_values
             )
 
-        self._log_traces_to_mlflow(all_prompts, all_completions, all_reward_dict)
+        self._log_traces_to_mlflow(all_prompts, all_completions, all_reward_dict, all_states)
 
-    def _log_traces_to_mlflow(self, all_prompts, all_completions, all_reward_dict):
+    def _log_traces_to_mlflow(self, all_prompts, all_completions, all_reward_dict, all_states):
         import mlflow
 
         with _true_random_context():
 
-            def log_generation(prompt, completion, reward_dict):
+            def log_generation(prompt, completion, reward_dict, state):
                 inputs = {"prompt": prompt}
                 tags = {k: str(v) for k, v in reward_dict.items()}
                 tags |= {"step": str(self.state.global_step)}
                 tags |= {"wandb_run_id": wandb.run.id}
+
+                # Add segment to tags if available
+                segment = state.get("info", {}).get("segment")
+                if segment:
+                    tags["segment"] = segment
+
                 span = mlflow.start_span_no_context(
                     name="generation",
                     inputs=inputs,
                     tags=tags
                 )
                 try:
-                    span.set_outputs({"completion": completion})
+                    outputs = {"completion": completion}
+
+                    # Add judge response if present
+                    judge_response = state.get("info", {}).get("judge_response")
+                    if judge_response:
+                        outputs["judge_response"] = judge_response
+
+                    span.set_outputs(outputs)
                 finally:
                     span.end()
 
@@ -1642,8 +1663,9 @@ class GRPOTrainer(Trainer):
                 prompt = all_prompts[i]
                 completion = all_completions[i]
                 reward_dict = {k: str(v[i]) for k, v in all_reward_dict.items()}
+                state = all_states[i]
 
-                log_generation(prompt, completion, reward_dict)
+                log_generation(prompt, completion, reward_dict, state)
 
     def _log_completion_metrics_primary(
         self,
