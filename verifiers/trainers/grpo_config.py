@@ -335,6 +335,14 @@ class GRPOConfig(TrainingArguments):
             "all prompts are logged."
         },
     )
+    initial_weight_sync: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to perform an initial weight sync to vLLM before the first generation. This is crucial "
+            "when continuing training from a LoRA checkpoint, ensuring vLLM has the correct merged weights "
+            "before generating the first batch."
+        },
+    )
 
     def __post_init__(self):
         super().__post_init__()

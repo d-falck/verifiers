@@ -552,9 +552,9 @@ class GRPOTrainer(Trainer):
         if self.accelerator.is_main_process:
             self.vllm_client.init_communicator()
 
-        self._last_loaded_step = (
-            0  # Initialize to 0 since vLLM already has initial weights
-        )
+        # Set initial step based on whether we need initial weight sync
+        self.initial_weight_sync = args.initial_weight_sync
+        self._last_loaded_step = -1 if self.initial_weight_sync else 0
         self.model_accepts_loss_kwargs = False
         # Weight updates to vLLM happen only when generating new completions
         # Frequency: every (gradient_accumulation_steps * num_iterations) training steps
