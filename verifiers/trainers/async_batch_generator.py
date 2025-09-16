@@ -38,6 +38,7 @@ class BatchResult(BaseModel):
         default_factory=list
     )  # Store completions for logging
     prompts: list[Any] = Field(default_factory=list)  # Store prompts for logging
+    segments: list[str] = Field(default_factory=list)  # Store segment info for logging
 
 
 class AsyncBatchGenerator:
@@ -294,12 +295,19 @@ class AsyncBatchGenerator:
             zero_truncated_completions=request.zero_truncated_completions,
         )
 
+        # Extract segment info from env_results
+        segments = []
+        for info in env_results.info:
+            segment = info.get("segment", "main") if isinstance(info, dict) else "main"
+            segments.append(segment)
+
         return BatchResult(
             batch_id=request.batch_id,
             processed_results=processed_results,
             all_reward_dict=all_reward_dict,
             completions=env_results.completion,
             prompts=env_results.prompt,
+            segments=segments,
         )
 
     async def _evaluate_async(self, num_samples: int = -1) -> GenerateOutputs:

@@ -1064,6 +1064,7 @@ class GRPOTrainer(Trainer):
                     "all_reward_dict": batch_result.all_reward_dict,
                     "completions": batch_result.completions,
                     "prompts": batch_result.prompts,
+                    "segments": batch_result.segments,
                 }
             else:
                 broadcast_data = None
@@ -1132,6 +1133,7 @@ class GRPOTrainer(Trainer):
                     all_reward_dict=broadcast_data["all_reward_dict"],
                     all_rewards=all_rewards,
                     generation_batch_size=len(all_rewards),
+                    segments=broadcast_data["segments"],
                 )
 
                 self._log_textual_data_primary(
@@ -1507,12 +1509,50 @@ class GRPOTrainer(Trainer):
             for key in self._textual_logs["rewards"]:
                 self._textual_logs["rewards"][key].clear()
 
+    def _log_segment_metrics(
+        self,
+        mode: str,
+        segments: List[str],
+        all_rewards: torch.Tensor,
+        all_reward_dict: Dict[str, Any],
+    ) -> None:
+        """
+        Log metrics grouped by segment.
+        Only logs rewards that start with the segment prefix (e.g., segment_a_accuracy for segment-a).
+        """
+        unique_segments = list(set(segments))
+
+        for segment in unique_segments:
+            # Get indices for this segment
+            segment_indices = [i for i, s in enumerate(segments) if s == segment]
+            if not segment_indices:
+                continue
+
+            # Log overall reward mean for this segment
+            segment_rewards = all_rewards[segment_indices]
+            self._metrics[mode][f"segments/{segment}/reward"].append(
+                segment_rewards.mean().item()
+            )
+
+            # Log segment-specific reward functions
+            segment_prefix = segment.replace("-", "_") + "_"
+
+            for reward_key, reward_values in all_reward_dict.items():
+                # Only log rewards that start with this segment's prefix
+                if reward_key.startswith(segment_prefix):
+                    # Get values for samples in this segment and average them
+                    segment_values = [reward_values[i] for i in segment_indices]
+                    if segment_values:
+                        mean_value = sum(segment_values) / len(segment_values)
+                        self._metrics[mode][f"segments/{segment}/rewards/{reward_key}"].append(mean_value)
+
     def _log_reward_metrics_primary(
         self,
         mode: str,
         all_reward_dict: Dict[str, Any],
         all_rewards: torch.Tensor,
         generation_batch_size: int,
+        segments: Optional[List[str]] = None,
     ) -> None:
         """
         Log generation metrics (PRIMARY PROCESS ONLY).
@@ -1536,6 +1576,10 @@ class GRPOTrainer(Trainer):
                     reward_tensor = reward_values
                 mean_reward = reward_tensor.mean().item()
                 self._metrics[mode][f"rewards/{reward_key}"].append(mean_reward)
+
+        # Log segment-specific metrics if segments are provided
+        if segments:
+            self._log_segment_metrics(mode, segments, all_rewards, all_reward_dict)
 
     def _log_textual_data_primary(
         self,
