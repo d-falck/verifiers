@@ -1528,6 +1528,19 @@ class GRPOTrainer(Trainer):
             if not segment_indices:
                 continue
 
+            # Initialize cumulative counter if not exists
+            cumulative_key = f"_segment_{segment}_cumulative_count"
+            if not hasattr(self, cumulative_key):
+                setattr(self, cumulative_key, 0)
+
+            # Update cumulative count
+            current_cumulative = getattr(self, cumulative_key) + len(segment_indices)
+            setattr(self, cumulative_key, current_cumulative)
+
+            # Log sample counts for this segment
+            self._metrics[mode][f"segments/{segment}/sample_count"].append(len(segment_indices))
+            self._metrics[mode][f"segments/{segment}/cumulative_sample_count"].append(current_cumulative)
+
             # Log overall reward mean for this segment
             segment_rewards = all_rewards[segment_indices]
             self._metrics[mode][f"segments/{segment}/reward"].append(
