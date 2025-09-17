@@ -1555,11 +1555,12 @@ class GRPOTrainer(Trainer):
             )
 
             # Log segment-specific reward functions
-            segment_prefix = segment.replace("-", "_") + "_"
+            # TODO: don't hardcode
+            segment_prefix = segment.replace("-", "_") + "_segment_"
 
             for reward_key, reward_values in all_reward_dict.items():
-                # Only log rewards that start with this segment's prefix
-                if reward_key.startswith(segment_prefix):
+                # Only log rewards that start with this segment's prefix or don't have any segment prefix
+                if reward_key.startswith(segment_prefix) or "_segment_" not in reward_key:
                     # Get values for samples in this segment and average them
                     segment_values = [reward_values[i] for i in segment_indices]
                     if segment_values:
