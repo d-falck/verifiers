@@ -343,6 +343,12 @@ class GRPOConfig(TrainingArguments):
             "before generating the first batch."
         },
     )
+    log_to_mlflow: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to log traces to MLFlow."
+        },
+    )
 
     def __post_init__(self):
         super().__post_init__()

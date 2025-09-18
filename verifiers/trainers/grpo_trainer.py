@@ -511,6 +511,7 @@ class GRPOTrainer(Trainer):
         self.log_completions = args.log_completions
         self.wandb_log_unique_prompts = args.wandb_log_unique_prompts
         self.num_completions_to_print = args.num_completions_to_print
+        self.log_to_mlflow = args.log_to_mlflow
 
         # Environment integration parameters
         self.mask_env_responses = args.mask_env_responses
@@ -1749,9 +1750,10 @@ class GRPOTrainer(Trainer):
                 else reward_values
             )
 
-        print(f"Logging {len(all_prompts)} traces to MLFlow..")
-        self._log_traces_to_mlflow(all_prompts, all_completions, all_reward_dict, all_states)
-        print(f"MLFlow logging complete.")
+        if self.log_to_mlflow:
+            print(f"Logging {len(all_prompts)} traces to MLFlow..")
+            self._log_traces_to_mlflow(all_prompts, all_completions, all_reward_dict, all_states)
+            print(f"MLFlow logging complete.")
 
     def _log_traces_to_mlflow(self, all_prompts, all_completions, all_reward_dict, all_states):
         import mlflow
