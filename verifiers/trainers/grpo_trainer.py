@@ -711,6 +711,34 @@ class GRPOTrainer(Trainer):
                 self.async_generator.stop()
             self._async_started = False
 
+    def training_step(self, model: torch.nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], num_items_in_batch: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Override training_step to add progress logging."""
+        # Log before the training step
+        if self.accelerator.is_main_process:
+            # Calculate which iteration and gradient accumulation step we're on
+            generate_every = self.gradient_accumulation_steps * self.num_iterations
+            iteration_within_cycle = (self._step - 1) % generate_every
+            grad_accum_within_iter = iteration_within_cycle % self.gradient_accumulation_steps
+            iteration_num = iteration_within_cycle // self.gradient_accumulation_steps + 1
+
+            self.logger.info(
+                f"Starting training step {self.state.global_step} - "
+                f"Iteration {iteration_num}/{self.num_iterations}, "
+                f"Gradient accumulation {grad_accum_within_iter + 1}/{self.gradient_accumulation_steps}"
+            )
+
+        # Call the parent training_step
+        loss = super().training_step(model, inputs, num_items_in_batch)
+
+        # Log after optimizer step (which happens when gradient accumulation is complete)
+        if self.accelerator.is_main_process:
+            if (self.state.global_step + 1) % self.gradient_accumulation_steps == 0:
+                self.logger.info(
+                    f"Completed gradient accumulation - optimizer step will occur at global step {self.state.global_step}"
+                )
+
+        return loss
+
     def _get_last_hidden_state(
         self, unwrapped_model, input_ids, attention_mask, logits_to_keep=None
     ):
@@ -962,6 +990,13 @@ class GRPOTrainer(Trainer):
 
         # Check if we need to generate new completions
         if self._step % generate_every == 0 or self._buffered_inputs is None:
+            # Log when starting new generation cycle
+            if self.accelerator.is_main_process:
+                self.logger.info(
+                    f"Starting new generation cycle at global step {self.state.global_step}, "
+                    f"internal step {self._step} (will generate for next {generate_every} steps)"
+                )
+
             # Update weights to vLLM if needed
             if self.state.global_step > self._last_loaded_step:
                 self.logger.info(
@@ -1171,6 +1206,17 @@ class GRPOTrainer(Trainer):
                 full_batch, self.gradient_accumulation_steps
             )
             self.accelerator.wait_for_everyone()
+        else:
+            # Log when reusing buffered inputs
+            if self.accelerator.is_main_process:
+                iteration_within_cycle = self._step % generate_every
+                grad_accum_within_iter = iteration_within_cycle % self.gradient_accumulation_steps
+                iteration_num = iteration_within_cycle // self.gradient_accumulation_steps + 1
+                self.logger.info(
+                    f"Reusing buffered inputs - Iteration {iteration_num}/{self.num_iterations}, "
+                    f"Gradient accumulation {grad_accum_within_iter + 1}/{self.gradient_accumulation_steps}"
+                )
+
         # Return appropriate slice from buffer
         result = self._buffered_inputs[self._step % self.gradient_accumulation_steps]
         self._step += 1
@@ -1204,6 +1250,16 @@ class GRPOTrainer(Trainer):
         num_items_in_batch: int | None = None,
     ) -> torch.Tensor:  # type: ignore
         mode = "train"
+
+        # Log progress for training forward pass
+        if mode == "train" and self.accelerator.is_main_process:
+            current_step = self.state.global_step
+            grad_accum_step = (self._step - 1) % self.gradient_accumulation_steps + 1
+            self.logger.info(
+                f"Training forward pass - Step {current_step}, "
+                f"Gradient accumulation {grad_accum_step}/{self.gradient_accumulation_steps}"
+            )
+
         # Compute the per-token log probabilities for the model
         input_ids, attention_mask = inputs["input_ids"], inputs["attention_mask"]
 
