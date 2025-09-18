@@ -3,6 +3,7 @@
 import logging
 import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, contextmanager
 import random
 from typing import Any, Dict, List, Optional, Sized, Tuple, Union
@@ -983,6 +984,10 @@ class GRPOTrainer(Trainer):
         2. On first calls, prime by submitting num_batches_ahead batches before retrieving any
         3. On subsequent calls, submit new batches to maintain the pipeline
         """
+        if self.accelerator.is_main_process:
+            prepare_start = time.time()
+            self.logger.info(f"\n[PREPARE INPUTS START] Called at step {self._step}")
+
         # Ensure all processes are synchronized at the start
         self.accelerator.wait_for_everyone()
         # inputs = list of dicts for all gradient accumulation steps
@@ -1086,10 +1091,17 @@ class GRPOTrainer(Trainer):
             # Now retrieve the batch we need for this step
             if self.accelerator.is_main_process:
                 # Get batch result
+                retrieval_start = time.time()
+                self.logger.info(f"\n[RETRIEVAL START] Getting batch {batch_id_to_retrieve} from async generator")
                 batch_result = self.async_generator.get_batch(batch_id_to_retrieve)
+                retrieval_time = time.time() - retrieval_start
+                self.logger.info(f"[RETRIEVAL END] Got batch {batch_id_to_retrieve} - Time: {retrieval_time:.2f}s")
+
                 processed_results = batch_result.processed_results
 
                 # Package raw data for broadcast (not tensors yet)
+                packaging_start = time.time()
+                self.logger.info(f"[PACKAGING START] Packaging data for broadcast")
                 broadcast_data = {
                     "prompt_ids": processed_results.prompt_ids,
                     "prompt_mask": processed_results.prompt_mask,
@@ -1103,13 +1115,34 @@ class GRPOTrainer(Trainer):
                 }
             else:
                 broadcast_data = None
+
+            if self.accelerator.is_main_process:
+                packaging_time = time.time() - packaging_start
+                self.logger.info(f"[PACKAGING END] Data packaged - Time: {packaging_time:.2f}s")
+
+            sync_start = time.time()
             self.accelerator.wait_for_everyone()
+            sync1_time = time.time() - sync_start
+
+            if self.accelerator.is_main_process:
+                self.logger.info(f"[SYNC] First wait_for_everyone took {sync1_time:.2f}s")
 
             # Broadcast processed data
+            broadcast_start = time.time()
+            if self.accelerator.is_main_process:
+                self.logger.info(f"[BROADCAST START] Broadcasting data to all processes")
             broadcast_list = [broadcast_data]
             broadcast_object_list(broadcast_list, from_process=0)
             broadcast_data = broadcast_list[0]
+
+            sync2_start = time.time()
             self.accelerator.wait_for_everyone()
+            sync2_time = time.time() - sync2_start
+
+            if self.accelerator.is_main_process:
+                broadcast_time = time.time() - broadcast_start
+                self.logger.info(f"[BROADCAST END] Broadcasting complete - Time: {broadcast_time:.2f}s")
+                self.logger.info(f"[SYNC] Second wait_for_everyone took {sync2_time:.2f}s")
 
             # Each process takes its slice
             process_slice = slice(
@@ -1118,6 +1151,10 @@ class GRPOTrainer(Trainer):
             )
 
             # Create rewards tensor and compute advantages using full batch
+            if self.accelerator.is_main_process:
+                tensor_start = time.time()
+                self.logger.info(f"[TENSOR START] Creating reward tensors and computing advantages")
+
             assert (
                 broadcast_data is not None
             )  # After broadcast, all processes have data
@@ -1125,6 +1162,10 @@ class GRPOTrainer(Trainer):
                 broadcast_data["rewards"], device=self.accelerator.device
             )
             all_advantages = self._compute_advantages(all_rewards)
+
+            if self.accelerator.is_main_process:
+                tensor_time = time.time() - tensor_start
+                self.logger.info(f"[TENSOR END] Tensors created - Time: {tensor_time:.2f}s")
 
             # Now create tensors only for this process's slice
             input_ids_list = []
@@ -1163,6 +1204,9 @@ class GRPOTrainer(Trainer):
 
             # Log metrics on main process only
             if self.accelerator.is_main_process:
+                metrics_start = time.time()
+                self.logger.info(f"[METRICS START] Logging metrics")
+
                 # Extract segments from states
                 segments = []
                 for state in broadcast_data["states"]:
@@ -1192,7 +1236,14 @@ class GRPOTrainer(Trainer):
                     all_prompt_mask=broadcast_data["prompt_mask"],
                 )
 
+                metrics_time = time.time() - metrics_start
+                self.logger.info(f"[METRICS END] Metrics logged - Time: {metrics_time:.2f}s")
+
             # Concatenate all data for shuffling
+            if self.accelerator.is_main_process:
+                final_prep_start = time.time()
+                self.logger.info(f"[FINAL PREP START] Shuffling and splitting batch")
+
             full_batch = {
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
@@ -1205,6 +1256,17 @@ class GRPOTrainer(Trainer):
             self._buffered_inputs = split_tensor_dict(
                 full_batch, self.gradient_accumulation_steps
             )
+
+            if self.accelerator.is_main_process:
+                final_prep_time = time.time() - final_prep_start
+                self.logger.info(f"[FINAL PREP END] Batch ready - Time: {final_prep_time:.2f}s")
+
+                # Log total time from retrieval to ready
+                total_processing_time = time.time() - retrieval_start
+                self.logger.info(
+                    f"\n[PROCESSING COMPLETE] Total post-retrieval processing time: {total_processing_time:.2f}s\n"
+                )
+
             self.accelerator.wait_for_everyone()
         else:
             # Log when reusing buffered inputs
@@ -1221,6 +1283,12 @@ class GRPOTrainer(Trainer):
         result = self._buffered_inputs[self._step % self.gradient_accumulation_steps]
         self._step += 1
         self.accelerator.wait_for_everyone()
+
+        if self.accelerator.is_main_process:
+            if 'prepare_start' in locals():
+                prepare_time = time.time() - prepare_start
+                self.logger.info(f"[PREPARE INPUTS END] Returning data - Total time: {prepare_time:.2f}s\n")
+
         return result
 
     def _compute_advantages(
@@ -1681,7 +1749,9 @@ class GRPOTrainer(Trainer):
                 else reward_values
             )
 
+        print(f"Logging {len(all_prompts)} traces to MLFlow..")
         self._log_traces_to_mlflow(all_prompts, all_completions, all_reward_dict, all_states)
+        print(f"MLFlow logging complete.")
 
     def _log_traces_to_mlflow(self, all_prompts, all_completions, all_reward_dict, all_states):
         import mlflow
@@ -1716,13 +1786,16 @@ class GRPOTrainer(Trainer):
                 finally:
                     span.end()
 
-            for i in range(len(all_prompts)):
-                prompt = all_prompts[i]
-                completion = all_completions[i]
-                reward_dict = {k: str(v[i]) for k, v in all_reward_dict.items()}
-                state = all_states[i]
+            n = len(all_prompts)
+            with ThreadPoolExecutor(max_workers=n) as executor:
 
-                log_generation(prompt, completion, reward_dict, state)
+                for i in range(n):
+                    prompt = all_prompts[i]
+                    completion = all_completions[i]
+                    reward_dict = {k: str(v[i]) for k, v in all_reward_dict.items()}
+                    state = all_states[i]
+
+                    executor.submit(log_generation, prompt, completion, reward_dict, state)
 
     def _log_completion_metrics_primary(
         self,
