@@ -1,3 +1,5 @@
+import asyncio
+
 from verifiers.rubrics.rubric import Rubric
 from verifiers.types import Info, Messages, RewardFunc, RolloutScores, State
 
@@ -50,7 +52,7 @@ class RubricGroup(Rubric):
         **kwargs,
     ) -> RolloutScores:
         """
-        Run all rubrics sequentially and return the aggregated scores.
+        Run all rubrics in parallel and return the aggregated scores.
 
         Reward functions with the same name are summed up.
         """
@@ -58,8 +60,9 @@ class RubricGroup(Rubric):
             reward=[],
             metrics={},
         )
-        for rubric in self.rubrics:
-            rubric_scores = await rubric.score_rollouts(
+
+        rubric_tasks = [
+            rubric.score_rollouts(
                 prompts,
                 completions,
                 answers,
@@ -69,6 +72,12 @@ class RubricGroup(Rubric):
                 max_concurrent,
                 **kwargs,
             )
+            for rubric in self.rubrics
+        ]
+
+        all_rubric_scores = await asyncio.gather(*rubric_tasks)
+
+        for rubric_scores in all_rubric_scores:
             # aggregate reward (element-wise sum across rubrics)
             if not all_scores.reward:
                 all_scores.reward = rubric_scores.reward
