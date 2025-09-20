@@ -109,6 +109,8 @@ class MultiTurnEnv(Environment):
                         reasoning_text = message.__pydantic_extra__['reasoning']
 
                     if reasoning_text:
+                        # Strip trailing whitespace from reasoning to avoid extra empty lines
+                        reasoning_text = reasoning_text.rstrip()
                         response_text = f"<think>\n{reasoning_text}\n</think>\n\n{response_text}"
                 response_message: ChatMessage = {
                     "role": "assistant",
