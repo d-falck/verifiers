@@ -269,7 +269,7 @@ class Environment(ABC):
                 )
                 return response
         except Exception as e:
-            self.logger.error(f"Error getting model response: {e} \n\nExiting...")
+            self.logger.error(f"Error getting model response: {e}")
             raise e
 
     @abstractmethod

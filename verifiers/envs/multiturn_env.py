@@ -1,6 +1,8 @@
 from abc import abstractmethod
 
+import json
 from openai import AsyncOpenAI, BadRequestError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from verifiers.envs.environment import Environment
 from verifiers.types import (
@@ -13,6 +15,11 @@ from verifiers.types import (
     State,
 )
 from verifiers.utils.async_utils import maybe_await
+
+
+class EmptyResponseError(Exception):
+    """Raised when the API returns a response with no choices"""
+    pass
 
 
 class MultiTurnEnv(Environment):
@@ -72,46 +79,54 @@ class MultiTurnEnv(Environment):
             state["responses_start_idx"] = []
         rollout = list(prompt) if not isinstance(prompt, str) else prompt
         while not is_completed:
-            if await maybe_await(self.is_completed, rollout, state, **kwargs):
-                is_completed = True
-                break
             try:
-                response = await self.get_model_response(
-                    client=client,
-                    model=model,
-                    prompt=rollout,
-                    oai_tools=info.get("oai_tools", None),
-                    sampling_args=sampling_args,
-                    message_type=self.message_type,
-                )
+                is_completed = await self._single_turn(client, model, info, sampling_args, completion, rollout, state, **kwargs)
             except BadRequestError as e:
                 if "context length" in str(e):
                     self.logger.warning(f"Context length exceeded at turn {state['turn']}, truncating rollout: {e}")
                     state["context_truncated"] = True
                     is_completed = True
-                    break
                 else:
                     raise
+            # TODO: handle general error.
+            # except Exception as e:
+            #     self.logger.warning(f"Error getting model response at turn {state['turn']}, skipping rollout: {e}")
+            #     state["error"] = str(e)
+            #     is_completed = True
+        return completion, state
+
+    async def _single_turn(self, client, model, info, sampling_args, completion, rollout, state, **kwargs) -> bool:
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            retry=retry_if_exception_type((EmptyResponseError, json.JSONDecodeError)),
+            before_sleep=lambda retry_state: self.logger.warning(
+                f"API error ({type(retry_state.outcome.exception()).__name__}), retrying (attempt {retry_state.attempt_number + 1}/3)"
+            )
+        )
+        async def inner():
+            nonlocal completion, rollout, state
+            
+            if await maybe_await(self.is_completed, rollout, state, **kwargs):
+                return True
+            response = await self.get_model_response(
+                client=client,
+                model=model,
+                prompt=rollout,
+                oai_tools=info.get("oai_tools", None),
+                sampling_args=sampling_args,
+                message_type=self.message_type,
+            )
+
+            if not response or not hasattr(response, 'choices') or not response.choices:
+                raise EmptyResponseError(f"API returned empty response at turn {state['turn']}")
+
             state["responses"].append(response)
             if self.message_type == "chat":
                 assert isinstance(rollout, list)
                 assert isinstance(completion, list)
                 assert isinstance(response, ChatCompletion)
-                response_text: str = response.choices[0].message.content or ""  # type: ignore
-                # Optionally inline reasoning field (e.g., from OpenRouter) into content
-                if self.inline_reasoning:
-                    message = response.choices[0].message
-                    # Check both as attribute and in pydantic extra dict
-                    reasoning_text = None
-                    if hasattr(message, 'reasoning') and message.reasoning:
-                        reasoning_text = message.reasoning
-                    elif hasattr(message, '__pydantic_extra__') and 'reasoning' in message.__pydantic_extra__:
-                        reasoning_text = message.__pydantic_extra__['reasoning']
-
-                    if reasoning_text:
-                        # Strip trailing whitespace from reasoning to avoid extra empty lines
-                        reasoning_text = reasoning_text.rstrip()
-                        response_text = f"<think>\n{reasoning_text}\n</think>\n\n{response_text}"
+                response_text: str = self._extract_response_text(response)
                 response_message: ChatMessage = {
                     "role": "assistant",
                     "content": response_text,
@@ -134,21 +149,41 @@ class MultiTurnEnv(Environment):
             if await maybe_await(self.is_completed, rollout, state, **kwargs) or (
                 state["turn"] >= self.max_turns and self.max_turns > 0
             ):
-                is_completed = True
+                return True
+
+            env_msgs, state = await maybe_await(
+                self.env_response, rollout, state, **kwargs
+            )
+            if self.message_type == "chat":
+                assert isinstance(env_msgs, list)
+                assert isinstance(rollout, list)
+                assert isinstance(completion, list)
+                rollout += env_msgs
+                completion += env_msgs
             else:
-                env_msgs, state = await maybe_await(
-                    self.env_response, rollout, state, **kwargs
-                )
-                if self.message_type == "chat":
-                    assert isinstance(env_msgs, list)
-                    assert isinstance(rollout, list)
-                    assert isinstance(completion, list)
-                    rollout += env_msgs
-                    completion += env_msgs
-                else:
-                    assert isinstance(env_msgs, str)
-                    assert isinstance(rollout, str)
-                    assert isinstance(completion, str)
-                    rollout += env_msgs
-                    completion += env_msgs
-        return completion, state
+                assert isinstance(env_msgs, str)
+                assert isinstance(rollout, str)
+                assert isinstance(completion, str)
+                rollout += env_msgs
+                completion += env_msgs
+
+            return False
+
+        return await inner()
+
+    def _extract_response_text(self, response: ChatCompletion) -> str:
+        response_text = response.choices[0].message.content or ""
+        if not self.inline_reasoning:
+            return response_text
+
+        message = response.choices[0].message
+        reasoning_text = None
+        if hasattr(message, 'reasoning') and message.reasoning:
+            reasoning_text = message.reasoning
+        # elif hasattr(message, '__pydantic_extra__') and 'reasoning' in message.__pydantic_extra__:
+        #     reasoning_text = message.__pydantic_extra__['reasoning']
+
+        if reasoning_text:
+            reasoning_text = reasoning_text.rstrip()
+            response_text = f"<think>\n{reasoning_text}\n</think>\n\n{response_text}"
+        return response_text
