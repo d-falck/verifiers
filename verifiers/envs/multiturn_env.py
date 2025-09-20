@@ -16,9 +16,10 @@ from verifiers.utils.async_utils import maybe_await
 
 
 class MultiTurnEnv(Environment):
-    def __init__(self, max_turns: int = -1, **kwargs):
+    def __init__(self, max_turns: int = -1, inline_reasoning: bool = False, **kwargs):
         super().__init__(**kwargs)
         self.max_turns = max_turns
+        self.inline_reasoning = inline_reasoning
 
     async def setup_state(self, state: State, **kwargs) -> State:
         return state
@@ -97,6 +98,18 @@ class MultiTurnEnv(Environment):
                 assert isinstance(completion, list)
                 assert isinstance(response, ChatCompletion)
                 response_text: str = response.choices[0].message.content or ""  # type: ignore
+                # Optionally inline reasoning field (e.g., from OpenRouter) into content
+                if self.inline_reasoning:
+                    message = response.choices[0].message
+                    # Check both as attribute and in pydantic extra dict
+                    reasoning_text = None
+                    if hasattr(message, 'reasoning') and message.reasoning:
+                        reasoning_text = message.reasoning
+                    elif hasattr(message, '__pydantic_extra__') and 'reasoning' in message.__pydantic_extra__:
+                        reasoning_text = message.__pydantic_extra__['reasoning']
+
+                    if reasoning_text:
+                        response_text = f"<think>\n{reasoning_text}\n</think>\n\n{response_text}"
                 response_message: ChatMessage = {
                     "role": "assistant",
                     "content": response_text,

@@ -13,6 +13,7 @@ class ToolEnv(MultiTurnEnv):
         tools: list[Callable] | None = None,
         max_turns: int = 10,
         error_formatter: Callable[[Exception], str] = lambda e: f"{str(e)}",
+        inline_reasoning: bool = False,
         **kwargs,
     ):
         self.tools = tools or []
@@ -20,7 +21,7 @@ class ToolEnv(MultiTurnEnv):
         self.error_formatter = error_formatter
         self.oai_tools = [convert_func_to_oai_tool(tool) for tool in self.tools]
         self.tool_map = {tool.__name__: tool for tool in self.tools}
-        super().__init__(oai_tools=self.oai_tools, max_turns=max_turns, **kwargs)
+        super().__init__(oai_tools=self.oai_tools, max_turns=max_turns, inline_reasoning=inline_reasoning, **kwargs)
 
     async def is_completed(
         self, messages: Messages, state: State, **kwargs: Any
