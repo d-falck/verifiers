@@ -1,7 +1,7 @@
 from abc import abstractmethod
 
 import json
-from openai import AsyncOpenAI, BadRequestError
+from openai import AsyncOpenAI, BadRequestError, APITimeoutError, RateLimitError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from verifiers.envs.environment import Environment
@@ -97,11 +97,11 @@ class MultiTurnEnv(Environment):
 
     async def _single_turn(self, client, model, info, sampling_args, completion, rollout, state, **kwargs) -> bool:
         @retry(
-            stop=stop_after_attempt(3),
+            stop=stop_after_attempt(4),
             wait=wait_exponential(multiplier=1, min=2, max=10),
-            retry=retry_if_exception_type((EmptyResponseError, json.JSONDecodeError)),
+            retry=retry_if_exception_type((EmptyResponseError, json.JSONDecodeError, APITimeoutError, RateLimitError)),
             before_sleep=lambda retry_state: self.logger.warning(
-                f"API error ({type(retry_state.outcome.exception()).__name__}), retrying (attempt {retry_state.attempt_number + 1}/3)"
+                f"API error ({type(retry_state.outcome.exception()).__name__}), retrying (attempt {retry_state.attempt_number + 1}/4)"
             )
         )
         async def inner():
