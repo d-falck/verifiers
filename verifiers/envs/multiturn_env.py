@@ -1,7 +1,7 @@
 from abc import abstractmethod
 
 import json
-from openai import AsyncOpenAI, BadRequestError, APITimeoutError, RateLimitError
+from openai import AsyncOpenAI, BadRequestError, APITimeoutError, RateLimitError, APIStatusError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from verifiers.envs.environment import Environment
@@ -99,7 +99,7 @@ class MultiTurnEnv(Environment):
         @retry(
             stop=stop_after_attempt(4),
             wait=wait_exponential(multiplier=1, min=2, max=10),
-            retry=retry_if_exception_type((EmptyResponseError, json.JSONDecodeError, APITimeoutError, RateLimitError)),
+            retry=retry_if_exception_type((EmptyResponseError, json.JSONDecodeError, APITimeoutError, RateLimitError, APIStatusError)),
             before_sleep=lambda retry_state: self.logger.warning(
                 f"API error ({type(retry_state.outcome.exception()).__name__}), retrying (attempt {retry_state.attempt_number + 1}/4)"
             )
