@@ -266,6 +266,7 @@ class GRPOTrainer(Trainer):
             Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]
         ] = (None, None),
         peft_config: Optional[PeftConfig] = None,
+        textual_data_callback = None,
         **kwargs,
     ):
         self.logger = logging.getLogger(__name__)
@@ -511,7 +512,8 @@ class GRPOTrainer(Trainer):
         self.log_completions = args.log_completions
         self.wandb_log_unique_prompts = args.wandb_log_unique_prompts
         self.num_completions_to_print = args.num_completions_to_print
-        self.log_to_mlflow = args.log_to_mlflow
+
+        self.textual_data_callback = textual_data_callback
 
         # Environment integration parameters
         self.mask_env_responses = args.mask_env_responses
@@ -1750,10 +1752,14 @@ class GRPOTrainer(Trainer):
                 else reward_values
             )
 
-        if self.log_to_mlflow:
-            print(f"Logging {len(all_prompts)} traces to MLFlow..")
-            self._log_traces_to_mlflow(all_prompts, all_completions, all_reward_dict, all_states)
-            print(f"MLFlow logging complete.")
+        if self.textual_data_callback is not None:
+            self.textual_data_callback(
+                all_prompts,
+                all_completions,
+                all_reward_dict,
+                all_states,
+                self.state.global_step,
+            )
 
     def _log_traces_to_mlflow(self, all_prompts, all_completions, all_reward_dict, all_states):
         import mlflow
