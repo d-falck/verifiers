@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Sized, Tuple, Union
 
 import datasets
 import numpy as np
+import tenacity
 import torch
 import wandb
 from accelerate.utils import broadcast_object_list, gather_object, is_peft_model
@@ -42,6 +43,34 @@ def _true_random_context():
         yield
     finally:
         random.setstate(saved_state)
+
+
+def _wandb_log_with_retry(data: dict, max_attempts: int = 5) -> None:
+    """Log to wandb with retry logic for network timeouts.
+    
+    Args:
+        data: Dictionary of data to log to wandb
+        max_attempts: Maximum number of retry attempts
+    """
+    logger = logging.getLogger(__name__)
+    
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(max_attempts),
+        wait=tenacity.wait_exponential(multiplier=2, min=2, max=60),
+        retry=tenacity.retry_if_exception_type((TimeoutError, ConnectionError, OSError)),
+        before=tenacity.before_log(logger, logging.WARNING),
+        after=tenacity.after_log(logger, logging.INFO),
+    )
+    def _do_log():
+        wandb.log(data)
+    
+    try:
+        _do_log()
+    except Exception as e:
+        logger.warning(
+            f"Failed to log to wandb after {max_attempts} attempts: {e}. "
+            "Continuing training without this log entry."
+        )
 
 
 class RepeatSampler(Sampler):
@@ -1635,7 +1664,7 @@ class GRPOTrainer(Trainer):
                     df = pd.DataFrame(table)
                     if self.wandb_log_unique_prompts:
                         df = df.drop_duplicates(subset=["prompt"])
-                    wandb.log({"completions": wandb.Table(dataframe=df)})
+                    _wandb_log_with_retry({"completions": wandb.Table(dataframe=df)})
 
             # Clear the textual logs after logging
             self._textual_logs["prompt"].clear()
