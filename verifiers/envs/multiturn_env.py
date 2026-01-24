@@ -2,7 +2,7 @@ from abc import abstractmethod
 
 import json
 from openai import AsyncOpenAI, BadRequestError, APITimeoutError, RateLimitError, APIStatusError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_if_exception_type
 
 from verifiers.envs.environment import Environment
 from verifiers.types import (
@@ -15,6 +15,9 @@ from verifiers.types import (
     State,
 )
 from verifiers.utils.async_utils import maybe_await
+
+
+API_NUM_RETRIES = 10
 
 
 class EmptyResponseError(Exception):
@@ -97,11 +100,11 @@ class MultiTurnEnv(Environment):
 
     async def _single_turn(self, client, model, info, sampling_args, completion, rollout, state, **kwargs) -> bool:
         @retry(
-            stop=stop_after_attempt(4),
-            wait=wait_exponential(multiplier=1, min=2, max=10),
+            stop=stop_after_attempt(API_NUM_RETRIES),
+            wait=wait_random_exponential(multiplier=1, min=2, max=10),
             retry=retry_if_exception_type((EmptyResponseError, json.JSONDecodeError, APITimeoutError, RateLimitError, APIStatusError)),
             before_sleep=lambda retry_state: self.logger.warning(
-                f"API error ({type(retry_state.outcome.exception()).__name__}), retrying (attempt {retry_state.attempt_number + 1}/4)"
+                f"API error ({type(retry_state.outcome.exception()).__name__}), retrying (attempt {retry_state.attempt_number + 1}/{API_NUM_RETRIES})"
             )
         )
         async def inner():
@@ -169,7 +172,23 @@ class MultiTurnEnv(Environment):
 
             return False
 
-        return await inner()
+        try:
+            return await inner()
+        except Exception as e:
+            # All retries failed - log error and skip this rollout instead of crashing
+            self.logger.error(
+                f"Failed to complete rollout after {API_NUM_RETRIES} attempts: {type(e).__name__}: {e}"
+            )
+            self.logger.error(f"Skipping rollout to continue evaluation")
+            # Mark the state as failed so we can track which rollouts failed
+            state["api_error"] = {
+                "type": type(e).__name__,
+                "message": str(e),
+                "turn": state["turn"],
+            }
+            # Return True to indicate this rollout is "complete" (even though it failed)
+            # This allows the evaluation to continue instead of crashing
+            return True
 
     def _extract_response_text(self, response: ChatCompletion) -> str:
         response_text = response.choices[0].message.content or ""
@@ -177,13 +196,61 @@ class MultiTurnEnv(Environment):
             return response_text
 
         message = response.choices[0].message
+
+        # DEBUG: Log message attributes to see what the API returns
+        # self.logger.info(f"[DEBUG REASONING] Message attributes: {dir(message)}")
+        # self.logger.info(f"[DEBUG REASONING] Message dict: {message.model_dump() if hasattr(message, 'model_dump') else 'N/A'}")
+
         reasoning_text = None
-        if hasattr(message, 'reasoning') and message.reasoning:
+
+        # Check for reasoning_details (OpenRouter format - array of objects with 'text' field)
+        if hasattr(message, 'reasoning_details') and message.reasoning_details:
+            # self.logger.info(f"[DEBUG REASONING] Found reasoning_details array: {len(message.reasoning_details)} items")
+            # Extract text from reasoning_details array
+            reasoning_parts = []
+            for detail in message.reasoning_details:
+                if hasattr(detail, 'text') and detail.text:
+                    reasoning_parts.append(detail.text)
+                elif isinstance(detail, dict) and 'text' in detail:
+                    reasoning_parts.append(detail['text'])
+            if reasoning_parts:
+                reasoning_text = '\n'.join(reasoning_parts)
+                # self.logger.info(f"[DEBUG REASONING] Extracted reasoning from reasoning_details: {reasoning_text[:200]}...")
+        # Check for reasoning_content (older OpenRouter format)
+        elif hasattr(message, 'reasoning_content') and message.reasoning_content:
+            # self.logger.info(f"[DEBUG REASONING] Found reasoning_content: {message.reasoning_content[:200]}...")
+            reasoning_text = message.reasoning_content
+        # Check for reasoning (DeepSeek, o1, etc.)
+        elif hasattr(message, 'reasoning') and message.reasoning:
+            # self.logger.info(f"[DEBUG REASONING] Found reasoning: {message.reasoning[:200]}...")
             reasoning_text = message.reasoning
-        # elif hasattr(message, '__pydantic_extra__') and 'reasoning' in message.__pydantic_extra__:
-        #     reasoning_text = message.__pydantic_extra__['reasoning']
+        # Check __pydantic_extra__ for non-standard fields
+        elif hasattr(message, '__pydantic_extra__') and message.__pydantic_extra__:
+            # self.logger.info(f"[DEBUG REASONING] Checking __pydantic_extra__: {message.__pydantic_extra__}")
+            if 'reasoning_details' in message.__pydantic_extra__:
+                reasoning_details = message.__pydantic_extra__['reasoning_details']
+                # self.logger.info(f"[DEBUG REASONING] Found reasoning_details in __pydantic_extra__: {reasoning_details}")
+                if isinstance(reasoning_details, list):
+                    reasoning_parts = []
+                    for detail in reasoning_details:
+                        if isinstance(detail, dict) and 'text' in detail:
+                            reasoning_parts.append(detail['text'])
+                    if reasoning_parts:
+                        reasoning_text = '\n'.join(reasoning_parts)
+            elif 'reasoning' in message.__pydantic_extra__:
+                reasoning_text = message.__pydantic_extra__['reasoning']
+                # self.logger.info(f"[DEBUG REASONING] Found reasoning in __pydantic_extra__")
+
+        if not reasoning_text:
+            # self.logger.info(f"[DEBUG REASONING] No reasoning found. Has reasoning_details: {hasattr(message, 'reasoning_details')}, Has reasoning_content: {hasattr(message, 'reasoning_content')}, Has reasoning: {hasattr(message, 'reasoning')}")
+            pass
 
         if reasoning_text:
             reasoning_text = reasoning_text.rstrip()
             response_text = f"<think>\n{reasoning_text}\n</think>\n\n{response_text}"
+            # self.logger.info(f"[DEBUG REASONING] Final response_text length: {len(response_text)}, has <think> tags: {response_text.startswith('<think>')}")
+        else:
+            # self.logger.info(f"[DEBUG REASONING] No reasoning_text to prepend")
+            pass
+
         return response_text

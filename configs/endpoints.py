@@ -40,7 +40,7 @@ ENDPOINTS = {
         "key": "DEEPSEEK_API_KEY",
     },
     "qwen3-a22b-instruct": {
-        "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+        "model": "qwen/qwen3-32b-Instruct-2507",
         "url": "https://api.deepinfra.com/v1/openai",
         "key": "DEEPINFRA_API_KEY",
     },
